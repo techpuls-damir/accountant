@@ -8,6 +8,7 @@
            goog.Uri))
 
 (defonce check-navigation (atom (constantly true)))
+(defonce check-navigation-done! (atom (constantly true)))
 
 (defn- transformer-create-url
   [token path-prefix location]
@@ -66,46 +67,50 @@
   "Create a click handler that blocks page reloads for known routes"
   [history path-exists? reload-same-path?]
   (events/listen
-   js/document
-   "click"
-   (fn [^js e]
-     (let [target (.-target e)
-           button (.-button e)
-           meta-key (.-metaKey e)
-           alt-key (.-altKey e)
-           ctrl-key (.-ctrlKey e)
-           shift-key (.-shiftKey e)
-           any-key (or meta-key alt-key ctrl-key shift-key)
-           href-node (find-href-node target)
-           href (when href-node (.-href href-node))
-           link-target (when href-node (.-target href-node))
-           ^js uri (.parse Uri href)
-           path (.getPath uri)
-           query (uri->query uri)
-           fragment (uri->fragment uri)
-           relative-href (str path query fragment)
-           title (.-title target)
-           host (.getDomain uri)
-           port (.getPort uri)
-           current-host js/window.location.hostname
-           current-port js/window.location.port
-           loc js/window.location
-           current-relative-href (str (.-pathname loc) (.-query loc) (.-hash loc))]
-       (when (and (not any-key)
-                  (#{"" "_self"} link-target)
-                  (= button 0)
-                  (= host current-host)
-                  (or (not port)
-                      (= (str port) (str current-port)))
-                  (path-exists? path))
-             (when (not= current-relative-href relative-href) ;; do not add duplicate html5 history state
-               (. ^js history (setToken relative-href title)))
-             (.preventDefault e)
-             (when reload-same-path?
-               (events/dispatchEvent history (Event. path (@check-navigation)))))))))
+    js/document
+    "click"
+    (fn [^js e]
+      (let [target (.-target e)
+            button (.-button e)
+            meta-key (.-metaKey e)
+            alt-key (.-altKey e)
+            ctrl-key (.-ctrlKey e)
+            shift-key (.-shiftKey e)
+            any-key (or meta-key alt-key ctrl-key shift-key)
+            href-node (find-href-node target)
+            href (when href-node (.-href href-node))
+            link-target (when href-node (.-target href-node))
+            ^js uri (.parse Uri href)
+            path (.getPath uri)
+            query (uri->query uri)
+            fragment (uri->fragment uri)
+            relative-href (str path query fragment)
+            title (.-title target)
+            host (.getDomain uri)
+            port (.getPort uri)
+            current-host js/window.location.hostname
+            current-port js/window.location.port
+            loc js/window.location
+            current-relative-href (str (.-pathname loc) (.-search loc) (.-hash loc))]
+        (when (and (not any-key)
+                   (#{"" "_self"} link-target)
+                   (= button 0)
+                   (= host current-host)
+                   (or (not port)
+                       (= (str port) (str current-port)))
+                   (path-exists? path))
+          (.preventDefault e)
+          (when (@check-navigation)
+            (@check-navigation-done!)
+            (when (not= current-relative-href relative-href) ;; do not add duplicate html5 history state
+              (. ^js history (setToken relative-href title)))
+            (when reload-same-path?
+              (events/dispatchEvent history (Event. path true)))))))))
 
 (defonce nav-handler nil)
 (defonce path-exists? nil)
+(defonce document-click-handler-listener-key nil)
+(defonce navigate-listener-key nil)
 
 (defn configure-navigation!
   "Create and configure HTML5 history navigation.
@@ -121,8 +126,19 @@
   (.setEnabled history true)
   (set! accountant.core/nav-handler nav-handler)
   (set! accountant.core/path-exists? path-exists?)
-  (dispatch-on-navigate history nav-handler)
-  (prevent-reload-on-known-path history path-exists? reload-same-path?))
+  (set! document-click-handler-listener-key (dispatch-on-navigate history nav-handler))
+  (set! navigate-listener-key (prevent-reload-on-known-path history path-exists? reload-same-path?)))
+
+(defn unconfigure-navigation!
+  "Teardown HTML5 history navigation.
+
+  Undoes all of the stateful changes, including unlistening to events, that are setup as part of
+  the call to `configure-navigation!`."
+  []
+  (set! nav-handler nil)
+  (set! path-exists? nil)
+  (doseq [key [document-click-handler-listener-key navigate-listener-key]]
+    (when key (events/unlistenByKey key))))
 
 (defn map->params [query]
   (let [params (map #(name %) (keys query))
